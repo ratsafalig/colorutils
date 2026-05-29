@@ -94,11 +94,17 @@ def test_effect_stack_supports_extended_operators() -> None:
     image = Image.new("RGBA", (20, 20), (120, 80, 40, 255))
     steps = [
         make_effect("color_adjust"),
+        make_effect("pc98_dither"),
         make_effect("gamma"),
         make_effect("threshold"),
         make_effect("posterize"),
         make_effect("invert"),
         make_effect("contrast"),
+        make_effect("auto_contrast"),
+        make_effect("clarity"),
+        make_effect("vibrance"),
+        make_effect("denoise"),
+        make_effect("depth_layers"),
         make_effect("box_blur"),
         make_effect("unsharp"),
         make_effect("emboss"),
@@ -127,3 +133,91 @@ def test_contrast_effect_increases_channel_spread() -> None:
     assert result.getpixel((0, 0))[0] < 80
     assert result.getpixel((1, 0))[0] > 176
     assert result.getpixel((0, 0))[3] == 255
+
+
+def test_enhancement_effects_preserve_size_mode_and_alpha() -> None:
+    image = Image.new("RGBA", (5, 5), (96, 112, 128, 255))
+    image.putpixel((2, 2), (255, 255, 255, 255))
+    steps = [
+        make_effect("auto_contrast"),
+        make_effect("clarity"),
+        make_effect("vibrance"),
+        make_effect("denoise"),
+    ]
+
+    result = apply_effect_stack(image, steps)
+
+    assert result.size == image.size
+    assert result.mode == "RGBA"
+    assert result.getpixel((0, 0))[3] == 255
+
+
+def test_auto_contrast_expands_luma_range() -> None:
+    image = Image.new("RGBA", (2, 1), (0, 0, 0, 255))
+    image.putpixel((0, 0), (64, 64, 64, 255))
+    image.putpixel((1, 0), (192, 192, 192, 255))
+    step = make_effect("auto_contrast")
+    step.params["cutoff"] = 0
+    step.params["strength"] = 100
+
+    result = apply_effect_stack(image, [step])
+
+    assert result.getpixel((0, 0))[0] == 0
+    assert result.getpixel((1, 0))[0] == 255
+
+
+def test_pc98_dither_maps_to_classic_palette_and_preserves_alpha() -> None:
+    image = Image.new("RGBA", (8, 8), (32, 96, 160, 128))
+    for y in range(8):
+        for x in range(8):
+            image.putpixel((x, y), (x * 32, y * 32, 180, 128))
+    step = make_effect("pc98_dither")
+    step.params["pixel_size"] = 2
+    step.params["dither_strength"] = 100
+    step.params["scanline_strength"] = 20
+
+    result = apply_effect_stack(image, [step])
+    palette = {
+        (0, 0, 0),
+        (0, 0, 170),
+        (170, 0, 0),
+        (170, 0, 170),
+        (0, 170, 0),
+        (0, 170, 170),
+        (170, 170, 0),
+        (170, 170, 170),
+        (85, 85, 85),
+        (85, 85, 255),
+        (255, 85, 85),
+        (255, 85, 255),
+        (85, 255, 85),
+        (85, 255, 255),
+        (255, 255, 85),
+        (255, 255, 255),
+    }
+
+    assert result.size == image.size
+    assert result.mode == "RGBA"
+    assert all(result.getpixel((x, y))[:3] in palette for y in range(8) for x in range(8))
+    assert result.getpixel((0, 0))[3] == 128
+
+
+def test_depth_layers_distinguishes_foreground_and_background() -> None:
+    image = Image.new("RGBA", (24, 16), (180, 190, 205, 255))
+    for y in range(4, 12):
+        for x in range(8, 16):
+            image.putpixel((x, y), (40, 45, 55, 255))
+    step = make_effect("depth_layers")
+    step.params["layers"] = "3"
+    step.params["foreground_cut"] = 70
+    step.params["background_cut"] = 30
+    step.params["background_blur"] = 3
+    step.params["background_dim"] = 35
+    step.params["foreground_boost"] = 60
+
+    result = apply_effect_stack(image, [step])
+
+    assert result.size == image.size
+    assert result.mode == "RGBA"
+    assert result.getpixel((0, 0))[3] == 255
+    assert result.getpixel((0, 0))[:3] != image.getpixel((0, 0))[:3]

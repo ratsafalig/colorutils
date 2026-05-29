@@ -10,6 +10,29 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from .processor import map_image_to_palette, pixelize_image
 
 
+PC98_PALETTE = np.array(
+    [
+        (0, 0, 0),
+        (0, 0, 170),
+        (170, 0, 0),
+        (170, 0, 170),
+        (0, 170, 0),
+        (0, 170, 170),
+        (170, 170, 0),
+        (170, 170, 170),
+        (85, 85, 85),
+        (85, 85, 255),
+        (255, 85, 85),
+        (255, 85, 255),
+        (85, 255, 85),
+        (85, 255, 255),
+        (255, 255, 85),
+        (255, 255, 255),
+    ],
+    dtype=np.int32,
+)
+
+
 EFFECT_LABELS: dict[str, str] = {
     "lospec": "Lospec Recolor",
     "gaussian3": "Gaussian 3x3",
@@ -19,6 +42,7 @@ EFFECT_LABELS: dict[str, str] = {
     "dilation": "Dilation",
     "pixelize": "Pixelize",
     "pixel_perfect": "Pixel Perfect",
+    "pc98_dither": "PC-98 Dither",
     "box_blur": "Box Blur",
     "unsharp": "Unsharp Mask",
     "sharpen": "Sharpen",
@@ -29,6 +53,11 @@ EFFECT_LABELS: dict[str, str] = {
     "posterize": "Posterize",
     "invert": "Invert",
     "contrast": "Contrast",
+    "auto_contrast": "Auto Contrast",
+    "clarity": "Clarity",
+    "vibrance": "Vibrance",
+    "denoise": "Denoise",
+    "depth_layers": "Depth Layers",
     "color_adjust": "Color Adjust",
     "gamma": "Gamma",
     "dog": "Difference of Gaussians",
@@ -80,6 +109,8 @@ def default_params(kind: str) -> dict[str, Any]:
         return {"algorithm": "average", "pixel_size": 8, "levels": 8, "strength": 100}
     if kind == "pixel_perfect":
         return {"pixel_size": 4, "levels": 12, "snap_colors": True}
+    if kind == "pc98_dither":
+        return {"pixel_size": 2, "dither_strength": 70, "scanline_strength": 15}
     if kind == "box_blur":
         return {"radius": 2, "strength": 100}
     if kind == "unsharp":
@@ -96,6 +127,24 @@ def default_params(kind: str) -> dict[str, Any]:
         return {"brightness": 100, "contrast": 100, "saturation": 100}
     if kind == "contrast":
         return {"amount": 130}
+    if kind == "auto_contrast":
+        return {"cutoff": 1, "strength": 100}
+    if kind == "clarity":
+        return {"amount": 140, "radius": 2, "threshold": 2, "strength": 100}
+    if kind == "vibrance":
+        return {"amount": 45}
+    if kind == "denoise":
+        return {"size": 3, "strength": 70}
+    if kind == "depth_layers":
+        return {
+            "layers": "3",
+            "foreground_cut": 72,
+            "background_cut": 34,
+            "background_blur": 4,
+            "background_dim": 24,
+            "foreground_boost": 35,
+            "edge_weight": 60,
+        }
     if kind == "gamma":
         return {"gamma": 100}
     if kind == "dog":
@@ -154,6 +203,13 @@ def apply_effect(image: Image.Image, step: EffectStep) -> Image.Image:
                 levels=int(params.get("levels", 12)),
             )
         return result
+    if kind == "pc98_dither":
+        return _pc98_dither(
+            image,
+            pixel_size=int(params.get("pixel_size", 2)),
+            dither_strength=float(params.get("dither_strength", 70)),
+            scanline_strength=float(params.get("scanline_strength", 15)),
+        )
     if kind == "box_blur":
         changed = image.convert("RGBA").filter(ImageFilter.BoxBlur(max(0, int(params.get("radius", 2)))))
         return _blend(image, changed, params.get("strength", 100))
@@ -185,6 +241,35 @@ def apply_effect(image: Image.Image, step: EffectStep) -> Image.Image:
         return _blend(image, changed, params.get("strength", 100))
     if kind == "contrast":
         return _contrast(image, float(params.get("amount", 130)))
+    if kind == "auto_contrast":
+        return _auto_contrast(
+            image,
+            cutoff=float(params.get("cutoff", 1)),
+            strength=float(params.get("strength", 100)),
+        )
+    if kind == "clarity":
+        return _clarity(
+            image,
+            amount=int(params.get("amount", 140)),
+            radius=float(params.get("radius", 2)),
+            threshold=int(params.get("threshold", 2)),
+            strength=float(params.get("strength", 100)),
+        )
+    if kind == "vibrance":
+        return _vibrance(image, float(params.get("amount", 45)))
+    if kind == "denoise":
+        return _denoise(image, int(params.get("size", 3)), float(params.get("strength", 70)))
+    if kind == "depth_layers":
+        return _depth_layers(
+            image,
+            layers=str(params.get("layers", "3")),
+            foreground_cut=float(params.get("foreground_cut", 72)),
+            background_cut=float(params.get("background_cut", 34)),
+            background_blur=float(params.get("background_blur", 4)),
+            background_dim=float(params.get("background_dim", 24)),
+            foreground_boost=float(params.get("foreground_boost", 35)),
+            edge_weight=float(params.get("edge_weight", 60)),
+        )
     if kind == "color_adjust":
         return _color_adjust(
             image,
@@ -309,6 +394,183 @@ def _color_adjust(image: Image.Image, *, brightness: float, contrast: float, sat
 
 def _contrast(image: Image.Image, amount: float) -> Image.Image:
     return ImageEnhance.Contrast(image.convert("RGBA")).enhance(max(0.0, amount / 100.0))
+
+
+def _pc98_dither(
+    image: Image.Image,
+    *,
+    pixel_size: int,
+    dither_strength: float,
+    scanline_strength: float,
+) -> Image.Image:
+    rgba = image.convert("RGBA")
+    pixel_size = max(1, min(16, int(pixel_size)))
+    work_size = (max(1, rgba.width // pixel_size), max(1, rgba.height // pixel_size))
+    work = rgba.resize(work_size, Image.Resampling.BOX) if pixel_size > 1 else rgba
+    arr = np.asarray(work, dtype=np.float32).copy()
+    height, width = arr.shape[:2]
+
+    bayer = np.array(
+        [
+            [0, 8, 2, 10],
+            [12, 4, 14, 6],
+            [3, 11, 1, 9],
+            [15, 7, 13, 5],
+        ],
+        dtype=np.float32,
+    )
+    threshold = np.tile((bayer + 0.5) / 16.0 - 0.5, (height // 4 + 1, width // 4 + 1))[:height, :width]
+    arr[..., :3] += threshold[..., None] * 96.0 * max(0.0, min(1.0, dither_strength / 100.0))
+
+    scanline = max(0.0, min(0.85, scanline_strength / 100.0))
+    if scanline:
+        arr[1::2, :3] *= 1.0 - scanline
+
+    rgb = np.clip(arr[..., :3], 0, 255).astype(np.int32).reshape(-1, 3)
+    palette = PC98_PALETTE
+    rgb_norm = np.sum(rgb * rgb, axis=1, keepdims=True)
+    palette_norm = np.sum(palette * palette, axis=1)
+    distances = rgb_norm + palette_norm[None, :] - 2 * (rgb @ palette.T)
+    nearest = np.argmin(distances, axis=1)
+    mapped_rgb = palette[nearest].astype(np.uint8).reshape(height, width, 3)
+    alpha = np.asarray(work.getchannel("A"), dtype=np.uint8)
+    result = Image.fromarray(np.dstack([mapped_rgb, alpha]), mode="RGBA")
+    if result.size != rgba.size:
+        result = result.resize(rgba.size, Image.Resampling.NEAREST)
+    return result
+
+
+def _auto_contrast(image: Image.Image, *, cutoff: float, strength: float) -> Image.Image:
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    rgb = ImageOps.autocontrast(rgba.convert("RGB"), cutoff=max(0.0, min(20.0, cutoff)))
+    result = rgb.convert("RGBA")
+    result.putalpha(alpha)
+    return _blend(rgba, result, strength)
+
+
+def _clarity(image: Image.Image, *, amount: int, radius: float, threshold: int, strength: float) -> Image.Image:
+    changed = image.convert("RGBA").filter(
+        ImageFilter.UnsharpMask(
+            radius=max(0.1, min(12.0, radius)),
+            percent=max(0, min(500, amount)),
+            threshold=max(0, min(64, threshold)),
+        )
+    )
+    return _blend(image, changed, strength)
+
+
+def _vibrance(image: Image.Image, amount: float) -> Image.Image:
+    amount = max(-100.0, min(150.0, amount)) / 100.0
+    rgba = image.convert("RGBA")
+    arr = np.asarray(rgba, dtype=np.float32).copy()
+    rgb = arr[..., :3]
+    max_c = np.max(rgb, axis=2, keepdims=True)
+    min_c = np.min(rgb, axis=2, keepdims=True)
+    saturation = (max_c - min_c) / np.maximum(max_c, 1.0)
+    luma = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    boost = amount * (1.0 - saturation)
+    arr[..., :3] = luma[..., None] + (rgb - luma[..., None]) * (1.0 + boost)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGBA")
+
+
+def _denoise(image: Image.Image, size: int, strength: float) -> Image.Image:
+    size = _odd_size(size)
+    rgba = image.convert("RGBA")
+    alpha = rgba.getchannel("A")
+    changed = rgba.filter(ImageFilter.MedianFilter(size)).filter(ImageFilter.SMOOTH_MORE)
+    changed.putalpha(alpha)
+    return _blend(rgba, changed, strength)
+
+
+def _depth_layers(
+    image: Image.Image,
+    *,
+    layers: str,
+    foreground_cut: float,
+    background_cut: float,
+    background_blur: float,
+    background_dim: float,
+    foreground_boost: float,
+    edge_weight: float,
+) -> Image.Image:
+    rgba = image.convert("RGBA")
+    saliency = _depth_saliency(rgba, edge_weight=edge_weight)
+    foreground_cut = max(1.0, min(99.0, foreground_cut))
+    background_cut = max(0.0, min(foreground_cut - 1.0, background_cut))
+    foreground_threshold = float(np.percentile(saliency, foreground_cut))
+    foreground_mask = _soft_mask(saliency >= foreground_threshold, radius=3.0)
+
+    if layers.strip() == "2":
+        background_mask = 1.0 - foreground_mask
+        mid_mask = np.zeros_like(foreground_mask)
+    else:
+        background_threshold = float(np.percentile(saliency, background_cut))
+        background_mask = _soft_mask(saliency <= background_threshold, radius=4.0)
+        mid_mask = np.clip(1.0 - foreground_mask - background_mask, 0.0, 1.0)
+
+    original = np.asarray(rgba, dtype=np.float32)
+    background = rgba.filter(ImageFilter.GaussianBlur(max(0.0, min(24.0, background_blur))))
+    background = ImageEnhance.Color(background).enhance(0.72)
+    background = ImageEnhance.Brightness(background).enhance(1.0 - max(0.0, min(80.0, background_dim)) / 100.0)
+    foreground = ImageEnhance.Contrast(rgba).enhance(1.0 + max(0.0, min(150.0, foreground_boost)) / 180.0)
+    foreground = ImageEnhance.Sharpness(foreground).enhance(1.0 + max(0.0, min(150.0, foreground_boost)) / 70.0)
+
+    bg = np.asarray(background, dtype=np.float32)
+    fg = np.asarray(foreground, dtype=np.float32)
+    weights = background_mask + mid_mask + foreground_mask
+    weights = np.maximum(weights, 0.001)
+    rgb = (
+        bg[..., :3] * background_mask[..., None]
+        + original[..., :3] * mid_mask[..., None]
+        + fg[..., :3] * foreground_mask[..., None]
+    ) / weights[..., None]
+    out = original.copy()
+    out[..., :3] = rgb
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGBA")
+
+
+def _depth_saliency(image: Image.Image, *, edge_weight: float) -> np.ndarray:
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+    gray = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    gx = np.zeros_like(gray)
+    gy = np.zeros_like(gray)
+    gx[:, 1:] = gray[:, 1:] - gray[:, :-1]
+    gy[1:, :] = gray[1:, :] - gray[:-1, :]
+    edge = np.sqrt(gx * gx + gy * gy)
+    edge = _normalize_map(edge)
+
+    blurred = np.asarray(Image.fromarray(np.clip(gray, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(4)))
+    contrast = _normalize_map(np.abs(gray - blurred.astype(np.float32)))
+
+    max_c = np.max(rgb, axis=2)
+    min_c = np.min(rgb, axis=2)
+    saturation = np.where(max_c == 0, 0.0, (max_c - min_c) / max_c)
+
+    height, width = gray.shape
+    yy, xx = np.mgrid[0:height, 0:width]
+    nx = np.abs((xx + 0.5) / max(1, width) - 0.5) * 2.0
+    ny = np.abs((yy + 0.5) / max(1, height) - 0.5) * 2.0
+    center = np.clip(1.0 - (nx * 0.72 + ny * 0.58), 0.0, 1.0)
+
+    edge_amount = max(0.0, min(1.0, edge_weight / 100.0))
+    saliency = edge * (0.25 + edge_amount * 0.45) + contrast * 0.30 + saturation * 0.18 + center * 0.18
+    return _normalize_map(saliency)
+
+
+def _soft_mask(mask: np.ndarray, *, radius: float) -> np.ndarray:
+    image = Image.fromarray((mask.astype(np.uint8) * 255), mode="L").filter(ImageFilter.GaussianBlur(radius))
+    return np.asarray(image, dtype=np.float32) / 255.0
+
+
+def _normalize_map(values: np.ndarray) -> np.ndarray:
+    values = values.astype(np.float32, copy=False)
+    min_value = float(np.min(values))
+    max_value = float(np.max(values))
+    span = max_value - min_value
+    if span <= 1e-6:
+        return np.zeros_like(values, dtype=np.float32)
+    return (values - min_value) / span
 
 
 def _gamma(image: Image.Image, gamma: float) -> Image.Image:

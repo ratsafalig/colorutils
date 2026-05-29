@@ -44,7 +44,7 @@ class ColorUtilsApp:
         self.root = root
         self.root.title("ColorUtils - Effect Stack")
         self.root.geometry("1360x840")
-        self.root.minsize(1100, 720)
+        self.root.minsize(1280, 720)
 
         self.client = LospecClient()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -72,6 +72,10 @@ class ColorUtilsApp:
         self.palettes: list[Palette] = []
         self.current_palette: Palette | None = None
         self.palette_list: Listbox | None = None
+        self.palette_list_top_slug: str | None = None
+        self.palette_list_top_index = 0
+        self.palette_list_y_fraction = 0.0
+        self.palette_list_restoring = False
         self.palette_page = -1
         self.palette_total = 0
         self.palette_loading = False
@@ -101,8 +105,14 @@ class ColorUtilsApp:
             "lospec",
             "pixelize",
             "pixel_perfect",
+            "pc98_dither",
             "color_adjust",
             "contrast",
+            "auto_contrast",
+            "clarity",
+            "vibrance",
+            "denoise",
+            "depth_layers",
             "gamma",
             "threshold",
             "posterize",
@@ -169,7 +179,7 @@ class ColorUtilsApp:
         shell = Frame(self.root, bg=BG)
         shell.pack(fill="both", expand=True, padx=16, pady=16)
 
-        left = Frame(shell, bg=PANEL, width=320, highlightbackground=PANEL, highlightthickness=0)
+        left = Frame(shell, bg=PANEL, width=540, highlightbackground=PANEL, highlightthickness=0)
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
@@ -185,11 +195,18 @@ class ColorUtilsApp:
         self._build_right_panel(right)
 
     def _build_left_panel(self, parent: Frame) -> None:
-        Label(parent, text="Operations", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
-            anchor="w", padx=18, pady=(18, 4)
+        operations_column = Frame(parent, bg=PANEL, width=220)
+        operations_column.pack(side="left", fill="both", padx=(18, 8), pady=18)
+        operations_column.pack_propagate(False)
+
+        stack_column = Frame(parent, bg=PANEL)
+        stack_column.pack(side="left", fill="both", expand=True, padx=(8, 18), pady=18)
+
+        Label(operations_column, text="Operations", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", pady=(0, 4)
         )
         self.operation_list = Listbox(
-            parent,
+            operations_column,
             activestyle="none",
             bg=CANVAS_BG,
             fg=TEXT,
@@ -198,21 +215,24 @@ class ColorUtilsApp:
             highlightthickness=0,
             relief="flat",
             borderwidth=0,
-            height=10,
             font=("Segoe UI", 10),
         )
         for kind in self.operation_kinds:
             self.operation_list.insert("end", EFFECT_LABELS[kind])
-        self.operation_list.pack(fill="x", padx=18, pady=(0, 10))
-        ttk.Button(parent, text="Add To Stack", style="Accent.TButton", command=self.add_selected_operation).pack(
-            fill="x", padx=18
+        self.operation_list.pack(fill="both", expand=True, pady=(0, 10))
+        ttk.Button(
+            operations_column,
+            text="Add To Stack",
+            style="Accent.TButton",
+            command=self.add_selected_operation,
+        ).pack(fill="x")
+
+        Label(stack_column, text="Stack", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", pady=(0, 4)
         )
 
-        Label(parent, text="Stack", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
-            anchor="w", padx=18, pady=(22, 4)
-        )
-        stack_frame = Frame(parent, bg=CANVAS_BG)
-        stack_frame.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        stack_frame = Frame(stack_column, bg=CANVAS_BG)
+        stack_frame.pack(fill="both", expand=True)
         self.stack_canvas = Canvas(
             stack_frame,
             bg=CANVAS_BG,
@@ -634,6 +654,7 @@ class ColorUtilsApp:
         self.refresh_stack_list()
 
     def render_parameter_panel(self) -> None:
+        self.remember_palette_list_view()
         self.palette_list = None
         for child in self.params_frame.winfo_children():
             child.destroy()
@@ -677,6 +698,10 @@ class ColorUtilsApp:
             self.add_slider_param("Pixel Size", "pixel_size", 1, 32)
             self.add_slider_param("Color Levels", "levels", 2, 32)
             self.add_check_param("Snap Colors", "snap_colors", bool(step.params.get("snap_colors", True)))
+        elif step.kind == "pc98_dither":
+            self.add_slider_param("Pixel Size", "pixel_size", 1, 12)
+            self.add_slider_param("Dither", "dither_strength", 0, 100)
+            self.add_slider_param("Scanline", "scanline_strength", 0, 80)
         elif step.kind == "unsharp":
             self.add_slider_param("Radius", "radius", 0, 12)
             self.add_slider_param("Percent", "percent", 0, 500)
@@ -696,6 +721,27 @@ class ColorUtilsApp:
             self.add_slider_param("Saturation", "saturation", 0, 300)
         elif step.kind == "contrast":
             self.add_slider_param("Amount", "amount", 0, 300)
+        elif step.kind == "auto_contrast":
+            self.add_slider_param("Cutoff", "cutoff", 0, 20, as_float=True)
+            self.add_slider_param("Strength", "strength", 0, 100)
+        elif step.kind == "clarity":
+            self.add_slider_param("Amount", "amount", 0, 500)
+            self.add_slider_param("Radius", "radius", 1, 12, as_float=True)
+            self.add_slider_param("Threshold", "threshold", 0, 64)
+            self.add_slider_param("Strength", "strength", 0, 100)
+        elif step.kind == "vibrance":
+            self.add_slider_param("Amount", "amount", -100, 150)
+        elif step.kind == "denoise":
+            self.add_slider_param("Kernel Size", "size", 3, 15, odd=True)
+            self.add_slider_param("Strength", "strength", 0, 100)
+        elif step.kind == "depth_layers":
+            self.add_combo_param("Layers", "layers", ("3", "2"))
+            self.add_slider_param("Foreground Cut", "foreground_cut", 50, 95)
+            self.add_slider_param("Background Cut", "background_cut", 5, 60)
+            self.add_slider_param("Background Blur", "background_blur", 0, 16, as_float=True)
+            self.add_slider_param("Background Dim", "background_dim", 0, 70)
+            self.add_slider_param("Foreground Boost", "foreground_boost", 0, 120)
+            self.add_slider_param("Edge Weight", "edge_weight", 0, 100)
         elif step.kind == "gamma":
             self.add_slider_param("Gamma x100", "gamma", 5, 500)
         elif step.kind == "dog":
@@ -1110,10 +1156,12 @@ class ColorUtilsApp:
 
     def load_palettes(self, *, reset: bool, refresh: bool = False) -> None:
         if reset:
+            self.remember_palette_list_view()
             self.palette_page = -1
             self.palette_total = 0
             self.palettes.clear()
-            self.populate_palette_listbox()
+            if not self.palette_list:
+                self.populate_palette_listbox()
         self.load_more_palettes(refresh=refresh)
 
     def load_more_palettes(self, refresh: bool = False) -> None:
@@ -1185,11 +1233,15 @@ class ColorUtilsApp:
         if not self.palette_list:
             return
         try:
+            self.palette_list_restoring = True
             self.palette_list.delete(0, "end")
+            for palette in self.palettes:
+                self.palette_list.insert("end", f"{palette.title} | {palette.color_count}")
         except TclError:
             return
-        for palette in self.palettes:
-            self.palette_list.insert("end", f"{palette.title} | {palette.color_count}")
+        finally:
+            self.palette_list_restoring = False
+        self.restore_palette_list_view()
 
     def append_palette_rows(self, palettes: list[Palette]) -> None:
         if not self.palette_list:
@@ -1202,6 +1254,41 @@ class ColorUtilsApp:
         except TclError:
             return
 
+    def remember_palette_list_view(self) -> None:
+        if not self.palette_list or self.palette_list_restoring:
+            return
+        try:
+            if self.palette_list.size() <= 0:
+                return
+            first, _last = self.palette_list.yview()
+            top_index = max(0, int(self.palette_list.nearest(0)))
+        except TclError:
+            return
+        self.palette_list_y_fraction = float(first)
+        self.palette_list_top_index = top_index
+        if 0 <= top_index < len(self.palettes):
+            self.palette_list_top_slug = self.palettes[top_index].slug
+
+    def restore_palette_list_view(self) -> None:
+        if not self.palette_list:
+            return
+        try:
+            size = self.palette_list.size()
+            if size <= 0:
+                return
+            target_index = self.palette_list_top_index
+            if self.palette_list_top_slug:
+                for index, palette in enumerate(self.palettes):
+                    if palette.slug == self.palette_list_top_slug:
+                        target_index = index
+                        break
+            if 0 <= target_index < size:
+                self.palette_list.yview(target_index)
+            else:
+                self.palette_list.yview_moveto(self.palette_list_y_fraction)
+        except TclError:
+            return
+
     def on_palette_select(self, _event=None) -> None:
         if not self.palette_list:
             return
@@ -1211,6 +1298,7 @@ class ColorUtilsApp:
         index = selection[0]
         if not (0 <= index < len(self.palettes)):
             return
+        self.remember_palette_list_view()
         self.current_palette = self.palettes[index]
         step = self.selected_step()
         if step and step.kind == "lospec":
@@ -1225,10 +1313,12 @@ class ColorUtilsApp:
     def palette_yview(self, *args) -> None:
         if self.palette_list:
             self.palette_list.yview(*args)
+            self.remember_palette_list_view()
         self.root.after(20, self.maybe_autoload_palettes)
 
     def palette_yscroll(self, scrollbar: Scrollbar, first: str, last: str) -> None:
         scrollbar.set(first, last)
+        self.remember_palette_list_view()
         if float(last) > 0.86:
             self.root.after(20, self.maybe_autoload_palettes)
 
