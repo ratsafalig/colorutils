@@ -28,6 +28,7 @@ EFFECT_LABELS: dict[str, str] = {
     "threshold": "Threshold",
     "posterize": "Posterize",
     "invert": "Invert",
+    "contrast": "Contrast",
     "color_adjust": "Color Adjust",
     "gamma": "Gamma",
     "dog": "Difference of Gaussians",
@@ -93,6 +94,8 @@ def default_params(kind: str) -> dict[str, Any]:
         return {"bits": 4}
     if kind == "color_adjust":
         return {"brightness": 100, "contrast": 100, "saturation": 100}
+    if kind == "contrast":
+        return {"amount": 130}
     if kind == "gamma":
         return {"gamma": 100}
     if kind == "dog":
@@ -180,6 +183,8 @@ def apply_effect(image: Image.Image, step: EffectStep) -> Image.Image:
     if kind == "invert":
         changed = _invert_rgba(image)
         return _blend(image, changed, params.get("strength", 100))
+    if kind == "contrast":
+        return _contrast(image, float(params.get("amount", 130)))
     if kind == "color_adjust":
         return _color_adjust(
             image,
@@ -302,12 +307,18 @@ def _color_adjust(image: Image.Image, *, brightness: float, contrast: float, sat
     return result
 
 
+def _contrast(image: Image.Image, amount: float) -> Image.Image:
+    return ImageEnhance.Contrast(image.convert("RGBA")).enhance(max(0.0, amount / 100.0))
+
+
 def _gamma(image: Image.Image, gamma: float) -> Image.Image:
     gamma = max(0.05, min(5.0, gamma))
     rgba = image.convert("RGBA")
-    arr = np.asarray(rgba, dtype=np.float32).copy()
-    arr[..., :3] = 255.0 * np.power(arr[..., :3] / 255.0, 1.0 / gamma)
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode="RGBA")
+    alpha = rgba.getchannel("A")
+    lut = [max(0, min(255, int(round(255.0 * ((value / 255.0) ** (1.0 / gamma)))))) for value in range(256)]
+    result = rgba.convert("RGB").point(lut * 3).convert("RGBA")
+    result.putalpha(alpha)
+    return result
 
 
 def _difference_of_gaussians(
@@ -351,4 +362,8 @@ def _odd_size(size: int) -> int:
 
 def _blend(original: Image.Image, changed: Image.Image, strength: Any) -> Image.Image:
     amount = max(0.0, min(1.0, float(strength) / 100.0))
+    if amount <= 0.0:
+        return original.convert("RGBA")
+    if amount >= 1.0:
+        return changed.convert("RGBA")
     return Image.blend(original.convert("RGBA"), changed.convert("RGBA"), amount)

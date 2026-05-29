@@ -30,6 +30,8 @@ def map_image_to_palette(
     palette = np.asarray(palette_to_rgb(colors), dtype=np.int32)
     if palette.size == 0:
         raise ValueError("Palette is empty")
+    palette_u8 = palette.astype(np.uint8)
+    palette_norm = np.sum(palette * palette, axis=1)
 
     source = image.convert("RGBA")
     arr = np.asarray(source, dtype=np.uint8).copy()
@@ -38,10 +40,10 @@ def map_image_to_palette(
 
     for start in range(0, flat_rgb.shape[0], chunk_size):
         chunk = flat_rgb[start : start + chunk_size]
-        diff = chunk[:, None, :] - palette[None, :, :]
-        distances = np.sum(diff * diff, axis=2)
+        chunk_norm = np.sum(chunk * chunk, axis=1, keepdims=True)
+        distances = chunk_norm + palette_norm[None, :] - 2 * (chunk @ palette.T)
         nearest = np.argmin(distances, axis=1)
-        output[start : start + chunk_size] = palette[nearest].astype(np.uint8)
+        output[start : start + chunk_size] = palette_u8[nearest]
 
     arr[..., :3] = output.reshape(arr.shape[0], arr.shape[1], 3)
     if not preserve_alpha:
@@ -226,8 +228,33 @@ def save_palette_gpl(
 
 def _median_block_pixelize(image: Image.Image, pixel_size: int) -> Image.Image:
     arr = np.asarray(image, dtype=np.uint8).copy()
-    for y in range(0, arr.shape[0], pixel_size):
-        for x in range(0, arr.shape[1], pixel_size):
+    if pixel_size <= 1:
+        return Image.fromarray(arr, mode="RGBA")
+
+    height, width = arr.shape[:2]
+    full_height = height - (height % pixel_size)
+    full_width = width - (width % pixel_size)
+    if full_height and full_width:
+        blocks = arr[:full_height, :full_width].reshape(
+            full_height // pixel_size,
+            pixel_size,
+            full_width // pixel_size,
+            pixel_size,
+            4,
+        )
+        blocks = blocks.transpose(0, 2, 1, 3, 4).reshape(
+            full_height // pixel_size,
+            full_width // pixel_size,
+            pixel_size * pixel_size,
+            4,
+        )
+        medians = np.median(blocks, axis=2).astype(np.uint8)
+        arr[:full_height, :full_width] = medians.repeat(pixel_size, axis=0).repeat(pixel_size, axis=1)
+
+    for y in range(0, height, pixel_size):
+        for x in range(0, width, pixel_size):
+            if y < full_height and x < full_width:
+                continue
             block = arr[y : y + pixel_size, x : x + pixel_size]
             block[:] = np.median(block.reshape(-1, 4), axis=0).astype(np.uint8)
     return Image.fromarray(arr, mode="RGBA")

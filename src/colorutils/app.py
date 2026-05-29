@@ -19,11 +19,24 @@ from .processor import histogram_rgb, image_statistics, save_palette_gpl, save_p
 
 BG = "#f7f8fa"
 PANEL = "#ffffff"
+PANEL_MUTED = "#f2f5f8"
 TEXT = "#172033"
 MUTED = "#687385"
-BORDER = "#dde3ea"
+BORDER = "#e5eaf0"
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
+ACCENT_SOFT = "#e8f0ff"
+CANVAS_BG = "#fbfcfe"
+PREVIEW_MAX_EDGE = 1200
+
+
+def display_image_size(image_size: tuple[int, int], bounds: tuple[int, int]) -> tuple[int, int]:
+    image_width, image_height = image_size
+    bound_width, bound_height = bounds
+    if image_width <= 0 or image_height <= 0:
+        return 1, 1
+    scale = min(max(1, bound_width) / image_width, max(1, bound_height) / image_height)
+    return max(1, int(round(image_width * scale))), max(1, int(round(image_height * scale)))
 
 
 class ColorUtilsApp:
@@ -43,6 +56,12 @@ class ColorUtilsApp:
         self.image_path: Path | None = None
         self.original_photo: ImageTk.PhotoImage | None = None
         self.preview_photo: ImageTk.PhotoImage | None = None
+        self.original_photo_key: tuple[Any, ...] | None = None
+        self.preview_photo_key: tuple[Any, ...] | None = None
+        self.original_canvas_items: tuple[int, int] | None = None
+        self.preview_canvas_items: tuple[int, int] | None = None
+        self.preview_source_cache_key: tuple[Any, ...] | None = None
+        self.preview_source_cache: Image.Image | None = None
 
         self.effect_steps: list[EffectStep] = []
         self.selected_step_index: int | None = None
@@ -74,6 +93,8 @@ class ColorUtilsApp:
         self.palette_search_after_id: str | None = None
         self.stack_after_id: str | None = None
         self.resize_after_id: str | None = None
+        self.preview_rendering = False
+        self.preview_pending = False
         self.stats_token = 0
 
         self.operation_kinds = [
@@ -81,6 +102,7 @@ class ColorUtilsApp:
             "pixelize",
             "pixel_perfect",
             "color_adjust",
+            "contrast",
             "gamma",
             "threshold",
             "posterize",
@@ -114,46 +136,48 @@ class ColorUtilsApp:
         style.configure(".", font=("Segoe UI", 10), background=BG, foreground=TEXT)
         style.configure("TFrame", background=BG)
         style.configure("TLabel", background=BG, foreground=TEXT)
-        style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(16, 8), background="#edf1f6", foreground=TEXT)
-        style.map("TNotebook.Tab", background=[("selected", PANEL)])
+        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", padding=(18, 9), background=PANEL_MUTED, foreground=MUTED, borderwidth=0)
+        style.map("TNotebook.Tab", background=[("selected", PANEL)], foreground=[("selected", TEXT)])
         style.configure(
             "Accent.TButton",
             background=ACCENT,
             foreground="#ffffff",
             borderwidth=0,
             focusthickness=0,
-            padding=(14, 8),
+            focuscolor=ACCENT,
+            padding=(16, 9),
         )
         style.map("Accent.TButton", background=[("active", ACCENT_DARK), ("disabled", "#9eb6ef")])
-        style.configure("TButton", background="#edf1f6", foreground=TEXT, borderwidth=0, padding=(12, 8))
-        style.map("TButton", background=[("active", "#e2e8f0"), ("disabled", "#f3f4f6")])
-        style.configure("Stack.TButton", background="#eef2f7", foreground=TEXT, borderwidth=0, padding=(8, 5))
-        style.map("Stack.TButton", background=[("active", "#e2e8f0"), ("disabled", "#f4f6f8")])
-        style.configure("Danger.TButton", background="#fee2e2", foreground="#991b1b", borderwidth=0, padding=(8, 5))
+        style.configure("TButton", background=PANEL_MUTED, foreground=TEXT, borderwidth=0, focusthickness=0, padding=(12, 8))
+        style.map("TButton", background=[("active", "#e9eef5"), ("disabled", "#f5f7fa")])
+        style.configure("Stack.TButton", background="#f3f6fa", foreground=TEXT, borderwidth=0, padding=(8, 5))
+        style.map("Stack.TButton", background=[("active", "#e9eef5"), ("disabled", "#f7f9fb")])
+        style.configure("Danger.TButton", background="#fff1f2", foreground="#be123c", borderwidth=0, padding=(8, 5))
         style.map("Danger.TButton", background=[("active", "#fecaca")])
-        style.configure("On.TButton", background="#dcfce7", foreground="#166534", borderwidth=0, padding=(8, 5))
-        style.map("On.TButton", background=[("active", "#bbf7d0")])
-        style.configure("Off.TButton", background="#f1f5f9", foreground=MUTED, borderwidth=0, padding=(8, 5))
-        style.map("Off.TButton", background=[("active", "#e2e8f0")])
-        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, padding=(8, 7))
-        style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=BORDER, padding=(8, 7))
+        style.configure("On.TButton", background="#ecfdf5", foreground="#047857", borderwidth=0, padding=(8, 5))
+        style.map("On.TButton", background=[("active", "#d1fae5")])
+        style.configure("Off.TButton", background="#f3f6fa", foreground=MUTED, borderwidth=0, padding=(8, 5))
+        style.map("Off.TButton", background=[("active", "#e9eef5")])
+        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=(8, 7))
+        style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=(8, 7))
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
         style.configure("Horizontal.TScale", background=BG)
+        style.configure("TProgressbar", background=ACCENT, troughcolor=PANEL_MUTED, borderwidth=0, lightcolor=ACCENT, darkcolor=ACCENT)
 
     def _build_ui(self) -> None:
         shell = Frame(self.root, bg=BG)
-        shell.pack(fill="both", expand=True)
+        shell.pack(fill="both", expand=True, padx=16, pady=16)
 
-        left = Frame(shell, bg=PANEL, width=300, highlightbackground=BORDER, highlightthickness=1)
-        left.pack(side="left", fill="y", padx=(14, 8), pady=14)
+        left = Frame(shell, bg=PANEL, width=320, highlightbackground=PANEL, highlightthickness=0)
+        left.pack(side="left", fill="y")
         left.pack_propagate(False)
 
         center = Frame(shell, bg=BG)
-        center.pack(side="left", fill="both", expand=True, padx=(6, 8), pady=14)
+        center.pack(side="left", fill="both", expand=True, padx=12)
 
-        right = Frame(shell, bg=PANEL, width=360, highlightbackground=BORDER, highlightthickness=1)
-        right.pack(side="left", fill="y", padx=(8, 14), pady=14)
+        right = Frame(shell, bg=PANEL, width=380, highlightbackground=PANEL, highlightthickness=0)
+        right.pack(side="left", fill="y")
         right.pack_propagate(False)
 
         self._build_left_panel(left)
@@ -161,42 +185,42 @@ class ColorUtilsApp:
         self._build_right_panel(right)
 
     def _build_left_panel(self, parent: Frame) -> None:
-        Label(parent, text="Operations", bg=PANEL, fg=TEXT, font=("Segoe UI", 16, "bold")).pack(
-            anchor="w", padx=16, pady=(16, 6)
+        Label(parent, text="Operations", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", padx=18, pady=(18, 4)
         )
         self.operation_list = Listbox(
             parent,
             activestyle="none",
-            bg="#ffffff",
+            bg=CANVAS_BG,
             fg=TEXT,
-            selectbackground="#dbeafe",
+            selectbackground=ACCENT_SOFT,
             selectforeground=TEXT,
-            highlightthickness=1,
-            highlightbackground=BORDER,
+            highlightthickness=0,
             relief="flat",
             borderwidth=0,
-            height=8,
+            height=10,
             font=("Segoe UI", 10),
         )
         for kind in self.operation_kinds:
             self.operation_list.insert("end", EFFECT_LABELS[kind])
-        self.operation_list.pack(fill="x", padx=16, pady=(0, 8))
-        ttk.Button(parent, text="Add To Stack", command=self.add_selected_operation).pack(fill="x", padx=16)
-
-        Label(parent, text="Stack", bg=PANEL, fg=TEXT, font=("Segoe UI", 16, "bold")).pack(
-            anchor="w", padx=16, pady=(18, 6)
+        self.operation_list.pack(fill="x", padx=18, pady=(0, 10))
+        ttk.Button(parent, text="Add To Stack", style="Accent.TButton", command=self.add_selected_operation).pack(
+            fill="x", padx=18
         )
-        stack_frame = Frame(parent, bg=PANEL)
-        stack_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        Label(parent, text="Stack", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", padx=18, pady=(22, 4)
+        )
+        stack_frame = Frame(parent, bg=CANVAS_BG)
+        stack_frame.pack(fill="both", expand=True, padx=18, pady=(0, 18))
         self.stack_canvas = Canvas(
             stack_frame,
-            bg="#ffffff",
-            highlightthickness=1,
-            highlightbackground=BORDER,
+            bg=CANVAS_BG,
+            highlightthickness=0,
             relief="flat",
             borderwidth=0,
         )
-        self.stack_rows = Frame(self.stack_canvas, bg="#ffffff")
+        self.stack_rows = Frame(self.stack_canvas, bg=CANVAS_BG)
         self.stack_window = self.stack_canvas.create_window((0, 0), window=self.stack_rows, anchor="nw")
         stack_scroll = Scrollbar(stack_frame, orient="vertical", command=self.stack_canvas.yview)
         self.stack_canvas.configure(yscrollcommand=stack_scroll.set)
@@ -208,42 +232,41 @@ class ColorUtilsApp:
         self.refresh_stack_list()
 
     def _build_center_panel(self, parent: Frame) -> None:
-        toolbar = Frame(parent, bg=BG)
-        toolbar.pack(fill="x", pady=(0, 10))
+        toolbar = Frame(parent, bg=PANEL, highlightthickness=0)
+        toolbar.pack(fill="x", pady=(0, 12))
         ttk.Button(toolbar, text="Open Image", style="Accent.TButton", command=self.open_image).pack(side="left")
-        ttk.Button(toolbar, text="Save Stack Result", command=self.save_result).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Save Stack Result", command=self.save_result).pack(side="left", padx=(10, 0))
         ttk.Checkbutton(toolbar, text="Sharp Display", variable=self.sharp_preview_var, command=self.schedule_render).pack(
-            side="right"
+            side="right", padx=(12, 14)
         )
-        Label(toolbar, textvariable=self.image_info_var, bg=BG, fg=MUTED).pack(side="left", padx=(12, 0))
+        Label(toolbar, textvariable=self.image_info_var, bg=PANEL, fg=MUTED).pack(side="left", padx=(14, 0))
 
         self.image_tabs = ttk.Notebook(parent)
         self.image_tabs.pack(fill="both", expand=True)
 
-        original_tab = Frame(self.image_tabs, bg=BG)
-        preview_tab = Frame(self.image_tabs, bg=BG)
-        stats_tab = Frame(self.image_tabs, bg=BG)
+        original_tab = Frame(self.image_tabs, bg=PANEL)
+        preview_tab = Frame(self.image_tabs, bg=PANEL)
+        stats_tab = Frame(self.image_tabs, bg=PANEL)
         self.image_tabs.add(original_tab, text="Original")
         self.image_tabs.add(preview_tab, text="Preview")
         self.image_tabs.add(stats_tab, text="Stats")
 
-        self.original_canvas = Canvas(original_tab, bg="#ffffff", bd=0, highlightthickness=1, highlightbackground=BORDER)
-        self.preview_canvas = Canvas(preview_tab, bg="#ffffff", bd=0, highlightthickness=1, highlightbackground=BORDER)
-        self.original_canvas.pack(fill="both", expand=True, padx=2, pady=8)
-        self.preview_canvas.pack(fill="both", expand=True, padx=2, pady=8)
+        self.original_canvas = Canvas(original_tab, bg=CANVAS_BG, bd=0, highlightthickness=0)
+        self.preview_canvas = Canvas(preview_tab, bg=CANVAS_BG, bd=0, highlightthickness=0)
+        self.original_canvas.pack(fill="both", expand=True, padx=0, pady=10)
+        self.preview_canvas.pack(fill="both", expand=True, padx=0, pady=10)
 
-        stats_split = Frame(stats_tab, bg=BG)
-        stats_split.pack(fill="both", expand=True, padx=2, pady=8)
-        self.hist_canvas = Canvas(stats_split, bg="#ffffff", bd=0, highlightthickness=1, highlightbackground=BORDER)
-        self.hist_canvas.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        stats_split = Frame(stats_tab, bg=PANEL)
+        stats_split.pack(fill="both", expand=True, padx=0, pady=10)
+        self.hist_canvas = Canvas(stats_split, bg=CANVAS_BG, bd=0, highlightthickness=0)
+        self.hist_canvas.pack(side="left", fill="both", expand=True, padx=(0, 10))
         self.stats_text = Text(
             stats_split,
             width=36,
-            bg="#ffffff",
+            bg=CANVAS_BG,
             fg=TEXT,
             relief="flat",
-            highlightthickness=1,
-            highlightbackground=BORDER,
+            highlightthickness=0,
             font=("Consolas", 10),
         )
         self.stats_text.pack(side="left", fill="y")
@@ -254,15 +277,15 @@ class ColorUtilsApp:
         self._draw_placeholder(self.preview_canvas, "Preview")
 
     def _build_right_panel(self, parent: Frame) -> None:
-        Label(parent, text="Parameters", bg=PANEL, fg=TEXT, font=("Segoe UI", 16, "bold")).pack(
-            anchor="w", padx=16, pady=(16, 6)
+        Label(parent, text="Parameters", bg=PANEL, fg=TEXT, font=("Segoe UI", 15, "bold")).pack(
+            anchor="w", padx=18, pady=(18, 4)
         )
         self.params_frame = Frame(parent, bg=PANEL)
-        self.params_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.params_frame.pack(fill="both", expand=True, padx=18, pady=(0, 10))
         self.busy_bar = ttk.Progressbar(parent, mode="indeterminate")
-        self.busy_bar.pack(fill="x", padx=16, pady=(0, 8))
+        self.busy_bar.pack(fill="x", padx=18, pady=(0, 8))
         Label(parent, textvariable=self.status_var, bg=PANEL, fg=MUTED, wraplength=320, justify="left").pack(
-            anchor="w", padx=16, pady=(0, 16)
+            anchor="w", padx=18, pady=(0, 18)
         )
         self.render_parameter_panel()
 
@@ -322,6 +345,8 @@ class ColorUtilsApp:
         with self.preview_cache_lock:
             self.preview_cache.clear()
             self.preview_cache_bytes = 0
+        self.preview_source_cache_key = None
+        self.preview_source_cache = None
 
     def cache_value(self, value: Any) -> Any:
         if isinstance(value, dict):
@@ -371,9 +396,11 @@ class ColorUtilsApp:
         image: Image.Image,
         steps: list[EffectStep],
         source_version: int,
+        *,
+        source_key: tuple[Any, ...] | None = None,
     ) -> tuple[Image.Image, int, int]:
         result = image.convert("RGBA")
-        state_key: tuple[Any, ...] = ("source", source_version)
+        state_key = source_key or ("source", source_version, image.size)
         hits = 0
         misses = 0
 
@@ -414,7 +441,7 @@ class ColorUtilsApp:
             empty = Label(
                 self.stack_rows,
                 text="No effects in stack",
-                bg="#ffffff",
+                bg=CANVAS_BG,
                 fg=MUTED,
                 font=("Segoe UI", 10),
             )
@@ -428,15 +455,15 @@ class ColorUtilsApp:
 
     def create_stack_row(self, index: int, step: EffectStep) -> None:
         selected = index == self.selected_step_index
-        row_bg = "#eef6ff" if selected else ("#ffffff" if step.enabled else "#f8fafc")
-        row_border = ACCENT if selected else BORDER
+        row_bg = ACCENT_SOFT if selected else ("#ffffff" if step.enabled else "#f6f8fb")
+        row_border = row_bg if not selected else "#c7d8ff"
         text_color = TEXT if step.enabled else MUTED
         row = Frame(self.stack_rows, bg=row_bg, highlightbackground=row_border, highlightthickness=1)
-        row.pack(fill="x", padx=8, pady=(8, 0))
+        row.pack(fill="x", padx=0, pady=(0, 8))
         self.stack_row_widgets.append(row)
 
         top = Frame(row, bg=row_bg)
-        top.pack(fill="x", padx=9, pady=(8, 4))
+        top.pack(fill="x", padx=10, pady=(9, 4))
         index_label = Label(
             top,
             text=f"{index + 1:02d}",
@@ -467,7 +494,7 @@ class ColorUtilsApp:
         ).pack(side="right")
 
         bottom = Frame(row, bg=row_bg)
-        bottom.pack(fill="x", padx=9, pady=(0, 8))
+        bottom.pack(fill="x", padx=10, pady=(0, 9))
         state = Label(
             bottom,
             text="Enabled" if step.enabled else "Disabled",
@@ -667,6 +694,8 @@ class ColorUtilsApp:
             self.add_slider_param("Brightness", "brightness", 0, 300)
             self.add_slider_param("Contrast", "contrast", 0, 300)
             self.add_slider_param("Saturation", "saturation", 0, 300)
+        elif step.kind == "contrast":
+            self.add_slider_param("Amount", "amount", 0, 300)
         elif step.kind == "gamma":
             self.add_slider_param("Gamma x100", "gamma", 5, 500)
         elif step.kind == "dog":
@@ -830,8 +859,9 @@ class ColorUtilsApp:
         self.source_image = image.convert("RGBA")
         self.source_version += 1
         self.clear_preview_cache()
-        self.preview_image = self.source_image.copy()
-        self.result_image = self.preview_image.copy()
+        self.clear_display_cache()
+        self.preview_image = self.preview_source_image()
+        self.result_image = None
         self.image_info_var.set(f"{self.image_path.name}  |  {self.source_image.width} x {self.source_image.height}")
         self.schedule_render()
         self.schedule_stack_preview()
@@ -847,28 +877,63 @@ class ColorUtilsApp:
     def start_stack_preview(self) -> None:
         if not self.source_image:
             return
+        self.stack_after_id = None
+        if self.preview_rendering:
+            self.preview_token += 1
+            self.preview_pending = True
+            return
         self.preview_token += 1
         token = self.preview_token
-        source = self.source_image.copy()
+        source = self.preview_source_image()
         source_version = self.source_version
+        source_key = ("preview-source", source_version, source.size, PREVIEW_MAX_EDGE)
         steps = [step.copy() for step in self.effect_steps]
+        if not any(step.enabled for step in steps):
+            self.preview_image = source
+            self.set_idle("Preview updated")
+            self.schedule_render()
+            return
+        self.preview_rendering = True
+        self.preview_pending = False
         self.set_busy("Rendering stack preview...")
 
         def build_preview() -> tuple[int, Image.Image, int, int]:
-            image, hits, misses = self.apply_effect_stack_cached(source, steps, source_version)
+            image, hits, misses = self.apply_effect_stack_cached(source, steps, source_version, source_key=source_key)
             return token, image, hits, misses
 
         self.run_background("preview", build_preview)
 
     def receive_preview(self, payload: object) -> None:
         token, image, hits, _misses = payload  # type: ignore[misc]
+        self.preview_rendering = False
         if token != self.preview_token:
+            if self.preview_pending:
+                self.preview_pending = False
+                self.start_stack_preview()
             return
         self.preview_image = image
-        self.result_image = image
         suffix = f" ({hits} cached)" if hits else ""
         self.set_idle(f"Preview updated{suffix}")
         self.schedule_render()
+        if self.preview_pending:
+            self.preview_pending = False
+            self.start_stack_preview()
+
+    def preview_source_image(self) -> Image.Image:
+        if not self.source_image:
+            raise ValueError("No source image")
+        source = self.source_image
+        cache_key = (self.source_version, source.size, PREVIEW_MAX_EDGE)
+        if self.preview_source_cache_key == cache_key and self.preview_source_cache is not None:
+            return self.preview_source_cache.copy()
+        if max(source.size) <= PREVIEW_MAX_EDGE:
+            preview = source.copy()
+        else:
+            preview = source.copy()
+            preview.thumbnail((PREVIEW_MAX_EDGE, PREVIEW_MAX_EDGE), Image.Resampling.LANCZOS)
+        self.preview_source_cache_key = cache_key
+        self.preview_source_cache = preview
+        return preview.copy()
 
     def save_result(self) -> None:
         if not self.source_image:
@@ -883,14 +948,17 @@ class ColorUtilsApp:
         )
         if not path:
             return
-        if self.result_image:
-            result = self.result_image
-        else:
+        if self.result_image is None:
+            self.set_busy("Rendering full-size result...")
             result, _hits, _misses = self.apply_effect_stack_cached(
                 self.source_image,
                 [step.copy() for step in self.effect_steps],
                 self.source_version,
+                source_key=("full-source", self.source_version, self.source_image.size),
             )
+            self.result_image = result
+        else:
+            result = self.result_image
         if Path(path).suffix.lower() in {".jpg", ".jpeg"}:
             result = result.convert("RGB")
         result.save(path)
@@ -907,6 +975,7 @@ class ColorUtilsApp:
 
     def safe_render_images(self) -> None:
         try:
+            self.resize_after_id = None
             self.render_images()
         except TclError:
             pass
@@ -916,24 +985,62 @@ class ColorUtilsApp:
         self.render_image_canvas(self.preview_canvas, self.preview_image, "Preview", original=False)
 
     def render_image_canvas(self, canvas: Canvas, image: Image.Image | None, label: str, *, original: bool) -> None:
-        canvas.delete("all")
         if image is None:
+            self.clear_canvas_cache(original)
             self._draw_placeholder(canvas, label)
             return
         width = max(120, canvas.winfo_width() - 28)
         height = max(120, canvas.winfo_height() - 48)
-        fitted = image.copy()
         resample = Image.Resampling.NEAREST if self.sharp_preview_var.get() else Image.Resampling.LANCZOS
-        fitted.thumbnail((width, height), resample)
-        photo = ImageTk.PhotoImage(fitted)
-        if original:
-            self.original_photo = photo
+        photo_key = (id(image), image.size, width, height, self.sharp_preview_var.get())
+        old_key = self.original_photo_key if original else self.preview_photo_key
+        if photo_key != old_key:
+            display_size = display_image_size(image.size, (width, height))
+            fitted = image.copy() if display_size == image.size else image.resize(display_size, resample)
+            photo = ImageTk.PhotoImage(fitted)
+            fitted_width, fitted_height = fitted.width, fitted.height
+            if original:
+                self.original_photo = photo
+                self.original_photo_key = photo_key
+            else:
+                self.preview_photo = photo
+                self.preview_photo_key = photo_key
         else:
-            self.preview_photo = photo
-        x = max(14, (canvas.winfo_width() - fitted.width) // 2)
-        y = max(34, (canvas.winfo_height() - fitted.height) // 2 + 12)
-        canvas.create_text(16, 16, anchor="w", fill=MUTED, font=("Segoe UI", 10, "bold"), text=label)
-        canvas.create_image(x, y, anchor="nw", image=photo)
+            photo = self.original_photo if original else self.preview_photo
+            if photo is None:
+                return
+            fitted_width, fitted_height = photo.width(), photo.height()
+        x = max(14, (canvas.winfo_width() - fitted_width) // 2)
+        y = max(34, (canvas.winfo_height() - fitted_height) // 2 + 12)
+        items = self.original_canvas_items if original else self.preview_canvas_items
+        if items is None:
+            canvas.delete("all")
+            text_item = canvas.create_text(16, 16, anchor="w", fill=MUTED, font=("Segoe UI", 10, "bold"), text=label)
+            image_item = canvas.create_image(x, y, anchor="nw", image=photo)
+            if original:
+                self.original_canvas_items = (text_item, image_item)
+            else:
+                self.preview_canvas_items = (text_item, image_item)
+        else:
+            text_item, image_item = items
+            canvas.coords(text_item, 16, 16)
+            canvas.itemconfigure(text_item, text=label)
+            canvas.coords(image_item, x, y)
+            canvas.itemconfigure(image_item, image=photo)
+
+    def clear_display_cache(self) -> None:
+        self.original_photo_key = None
+        self.preview_photo_key = None
+        self.original_canvas_items = None
+        self.preview_canvas_items = None
+
+    def clear_canvas_cache(self, original: bool) -> None:
+        if original:
+            self.original_photo_key = None
+            self.original_canvas_items = None
+        else:
+            self.preview_photo_key = None
+            self.preview_canvas_items = None
 
     def _draw_placeholder(self, canvas: Canvas, label: str) -> None:
         canvas.delete("all")

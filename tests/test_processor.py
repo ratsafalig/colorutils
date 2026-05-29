@@ -1,5 +1,6 @@
 from PIL import Image
 
+from colorutils.app import display_image_size
 from colorutils.effects import apply_effect_stack, make_effect
 from colorutils.processor import (
     crop_box,
@@ -15,6 +16,12 @@ from colorutils.processor import (
 def test_hex_to_rgb() -> None:
     assert hex_to_rgb("#0f8") == (0, 255, 136)
     assert hex_to_rgb("112233") == (17, 34, 51)
+
+
+def test_display_image_size_scales_up_and_down() -> None:
+    assert display_image_size((200, 100), (800, 600)) == (800, 400)
+    assert display_image_size((1600, 900), (800, 600)) == (800, 450)
+    assert display_image_size((100, 400), (800, 600)) == (150, 600)
 
 
 def test_map_image_to_nearest_palette_color() -> None:
@@ -91,6 +98,7 @@ def test_effect_stack_supports_extended_operators() -> None:
         make_effect("threshold"),
         make_effect("posterize"),
         make_effect("invert"),
+        make_effect("contrast"),
         make_effect("box_blur"),
         make_effect("unsharp"),
         make_effect("emboss"),
@@ -105,3 +113,17 @@ def test_effect_stack_supports_extended_operators() -> None:
 
     assert result.size == image.size
     assert result.mode == "RGBA"
+
+
+def test_contrast_effect_increases_channel_spread() -> None:
+    image = Image.new("RGBA", (2, 1), (0, 0, 0, 255))
+    image.putpixel((0, 0), (80, 80, 80, 255))
+    image.putpixel((1, 0), (176, 176, 176, 255))
+    step = make_effect("contrast")
+    step.params["amount"] = 200
+
+    result = apply_effect_stack(image, [step])
+
+    assert result.getpixel((0, 0))[0] < 80
+    assert result.getpixel((1, 0))[0] > 176
+    assert result.getpixel((0, 0))[3] == 255
