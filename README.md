@@ -11,9 +11,10 @@
 - Lospec 参数面板会先加载多页填满列表，滚动到底部附近会自动继续加载。
 - 输入关键词搜索特定 Lospec 调色盘。
 - `Lospec Recolor` 可以作为 stack 中任意一步，将当前图像映射到指定 Lospec 调色盘最近颜色。
-- 支持在换色后继续叠加 `Gaussian 3x3`、`Laplace`、`Sobel`、`Erosion`、`Dilation`、`Pixelize`、`Pixel Perfect`。
+- 支持在换色后继续叠加卷积、边缘、形态学、颜色调整、阈值化、像素化等操作。
 - 中间区域使用 Tab 切换 `Original`、`Preview`、`Stats`。
 - 窗口缩放时只做延迟刷新，避免拖动窗口过程中连续重绘。
+- 参数变化、添加/拖拽 stack、渲染和 palette 加载都会给出即时状态反馈。
 - 保存 stack 处理后的图片。
 - Stats Tab 提供 RGB 直方图和基础图片统计。
 
@@ -26,6 +27,9 @@
 - Erosion / Dilation：腐蚀和膨胀，可调 kernel size 和迭代次数。
 - Pixelize：多种像素化算法。
 - Pixel Perfect：最近邻硬边缩放 + 可选色阶吸附。
+- Box Blur / Median Filter / Unsharp Mask / Sharpen / Emboss / Edge Enhance。
+- Threshold / Posterize / Invert / Color Adjust / Gamma。
+- Difference of Gaussians / Opening / Closing / Morph Gradient。
 
 ## Pixelize 算法
 

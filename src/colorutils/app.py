@@ -71,11 +71,26 @@ class ColorUtilsApp:
             "lospec",
             "pixelize",
             "pixel_perfect",
+            "color_adjust",
+            "gamma",
+            "threshold",
+            "posterize",
+            "invert",
             "gaussian3",
+            "box_blur",
             "laplace",
             "sobel",
+            "dog",
+            "edge_enhance",
+            "sharpen",
+            "unsharp",
+            "emboss",
+            "median",
             "erosion",
             "dilation",
+            "opening",
+            "closing",
+            "morph_gradient",
         ]
 
         self._configure_style()
@@ -234,6 +249,8 @@ class ColorUtilsApp:
         )
         self.params_frame = Frame(parent, bg=PANEL)
         self.params_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        self.busy_bar = ttk.Progressbar(parent, mode="indeterminate")
+        self.busy_bar.pack(fill="x", padx=16, pady=(0, 8))
         Label(parent, textvariable=self.status_var, bg=PANEL, fg=MUTED, wraplength=320, justify="left").pack(
             anchor="w", padx=16, pady=(0, 16)
         )
@@ -244,7 +261,7 @@ class ColorUtilsApp:
         self.stack_list.bind("<<ListboxSelect>>", self.on_stack_select)
         self.stack_list.bind("<Button-1>", self.start_stack_drag)
         self.stack_list.bind("<B1-Motion>", self.drag_stack)
-        self.stack_list.bind("<ButtonRelease-1>", lambda _event: self.finish_stack_drag())
+        self.stack_list.bind("<ButtonRelease-1>", self.on_stack_release)
         self.palette_search_var.trace_add("write", lambda *_: self.debounce_palette_search())
         self.root.bind("<Configure>", lambda _event: self.schedule_render())
 
@@ -256,7 +273,7 @@ class ColorUtilsApp:
                 break
             if kind == "error":
                 self.palette_loading = False
-                self.status_var.set(str(payload))
+                self.set_idle(str(payload))
             elif kind == "palettes":
                 self.receive_palettes(payload)
             elif kind == "palette_search":
@@ -288,6 +305,8 @@ class ColorUtilsApp:
             step.params["palette_title"] = self.current_palette.title
             step.params["palette_slug"] = self.current_palette.slug
         self.effect_steps.append(step)
+        self.flash_widget(self.stack_list)
+        self.status_var.set(f"Added {step.label}")
         self.selected_step_index = len(self.effect_steps) - 1
         self.refresh_stack_list()
         self.render_parameter_panel()
@@ -297,7 +316,7 @@ class ColorUtilsApp:
         self.stack_list.delete(0, "end")
         for index, step in enumerate(self.effect_steps, start=1):
             prefix = "[on]" if step.enabled else "[off]"
-            self.stack_list.insert("end", f"{index}. {prefix} {step.label}")
+            self.stack_list.insert("end", f"{index}. {prefix} {step.label}    [delete]")
         if self.selected_step_index is not None and self.selected_step_index < len(self.effect_steps):
             self.stack_list.selection_clear(0, "end")
             self.stack_list.selection_set(self.selected_step_index)
@@ -327,6 +346,7 @@ class ColorUtilsApp:
         )
         self.selected_step_index = new_index
         self.refresh_stack_list()
+        self.flash_widget(self.stack_list)
         self.render_parameter_panel()
         self.schedule_stack_preview()
 
@@ -356,10 +376,19 @@ class ColorUtilsApp:
         self.drag_index = target
         self.selected_step_index = target
         self.refresh_stack_list()
+        self.flash_widget(self.stack_list)
         self.schedule_stack_preview()
 
     def finish_stack_drag(self) -> None:
         self.drag_index = None
+
+    def on_stack_release(self, event) -> None:
+        index = self.stack_list.nearest(event.y)
+        delete_zone = self.stack_list.winfo_width() - 82
+        self.finish_stack_drag()
+        if 0 <= index < len(self.effect_steps) and event.x >= delete_zone:
+            self.selected_step_index = index
+            self.delete_selected_step()
 
     def render_parameter_panel(self) -> None:
         self.palette_list = None
@@ -379,6 +408,9 @@ class ColorUtilsApp:
         elif step.kind == "gaussian3":
             self.add_slider_param("Iterations", "iterations", 1, 8)
             self.add_slider_param("Strength", "strength", 0, 100)
+        elif step.kind == "box_blur":
+            self.add_slider_param("Radius", "radius", 0, 20)
+            self.add_slider_param("Strength", "strength", 0, 100)
         elif step.kind == "laplace":
             self.add_combo_param("Mode", "mode", ("edges", "add"))
             self.add_slider_param("Strength", "strength", 0, 300)
@@ -388,6 +420,11 @@ class ColorUtilsApp:
         elif step.kind in {"erosion", "dilation"}:
             self.add_slider_param("Kernel Size", "size", 3, 15, odd=True)
             self.add_slider_param("Iterations", "iterations", 1, 8)
+        elif step.kind in {"opening", "closing"}:
+            self.add_slider_param("Kernel Size", "size", 3, 15, odd=True)
+            self.add_slider_param("Iterations", "iterations", 1, 8)
+        elif step.kind == "morph_gradient":
+            self.add_slider_param("Kernel Size", "size", 3, 15, odd=True)
         elif step.kind == "pixelize":
             self.add_combo_param("Algorithm", "algorithm", ("average", "median", "nearest", "posterize", "ordered_dither"))
             self.add_slider_param("Pixel Size", "pixel_size", 2, 64)
@@ -397,6 +434,29 @@ class ColorUtilsApp:
             self.add_slider_param("Pixel Size", "pixel_size", 1, 32)
             self.add_slider_param("Color Levels", "levels", 2, 32)
             self.add_check_param("Snap Colors", "snap_colors", bool(step.params.get("snap_colors", True)))
+        elif step.kind == "unsharp":
+            self.add_slider_param("Radius", "radius", 0, 12)
+            self.add_slider_param("Percent", "percent", 0, 500)
+            self.add_slider_param("Threshold", "threshold", 0, 64)
+        elif step.kind in {"sharpen", "emboss", "edge_enhance", "invert"}:
+            self.add_slider_param("Strength", "strength", 0, 300 if step.kind == "sharpen" else 100)
+        elif step.kind == "median":
+            self.add_slider_param("Kernel Size", "size", 3, 15, odd=True)
+        elif step.kind == "threshold":
+            self.add_slider_param("Threshold", "threshold", 0, 255)
+            self.add_check_param("Invert", "invert", bool(step.params.get("invert", False)))
+        elif step.kind == "posterize":
+            self.add_slider_param("Bits", "bits", 1, 8)
+        elif step.kind == "color_adjust":
+            self.add_slider_param("Brightness", "brightness", 0, 300)
+            self.add_slider_param("Contrast", "contrast", 0, 300)
+            self.add_slider_param("Saturation", "saturation", 0, 300)
+        elif step.kind == "gamma":
+            self.add_slider_param("Gamma x100", "gamma", 5, 500)
+        elif step.kind == "dog":
+            self.add_slider_param("Small Radius", "small_radius", 0, 12, as_float=True)
+            self.add_slider_param("Large Radius", "large_radius", 1, 24, as_float=True)
+            self.add_slider_param("Strength", "strength", 0, 300)
 
     def render_lospec_params(self, step: EffectStep) -> None:
         self.add_check_param("Preserve Alpha", "preserve_alpha", bool(step.params.get("preserve_alpha", True)))
@@ -447,7 +507,16 @@ class ColorUtilsApp:
         self.populate_palette_listbox()
         ttk.Button(self.params_frame, text="Load More Palettes", command=self.load_more_palettes).pack(fill="x")
 
-    def add_slider_param(self, label: str, key: str, start: int, end: int, *, odd: bool = False) -> None:
+    def add_slider_param(
+        self,
+        label: str,
+        key: str,
+        start: int,
+        end: int,
+        *,
+        odd: bool = False,
+        as_float: bool = False,
+    ) -> None:
         step = self.selected_step()
         if not step:
             return
@@ -459,17 +528,27 @@ class ColorUtilsApp:
         self.param_vars.append(title_var)
 
         def update_label() -> None:
+            if as_float:
+                title_var.set(f"{label}: {value_var.get():.1f}")
+                return
             value = int(round(value_var.get()))
             if odd and value % 2 == 0:
                 value += 1
             title_var.set(f"{label}: {value}")
 
         def changed(_value=None) -> None:
+            if as_float:
+                step.params[key] = float(value_var.get())
+                update_label()
+                self.status_var.set(f"Updated {label}")
+                self.schedule_stack_preview()
+                return
             value = int(round(value_var.get()))
             if odd and value % 2 == 0:
                 value += 1
             step.params[key] = value
             update_label()
+            self.status_var.set(f"Updated {label}")
             self.schedule_stack_preview()
 
         Label(group, textvariable=title_var, bg=PANEL, fg=MUTED).pack(anchor="w")
@@ -502,6 +581,7 @@ class ColorUtilsApp:
         if not step:
             return
         step.params[key] = value
+        self.status_var.set(f"Updated {key}")
         self.schedule_stack_preview()
 
     def set_step_enabled(self, value: bool) -> None:
@@ -509,6 +589,7 @@ class ColorUtilsApp:
         if not step:
             return
         step.enabled = value
+        self.status_var.set("Step enabled" if value else "Step disabled")
         self.refresh_stack_list()
         self.render_parameter_panel()
         self.schedule_stack_preview()
@@ -552,7 +633,7 @@ class ColorUtilsApp:
         token = self.preview_token
         source = self.source_image.copy()
         steps = [step.copy() for step in self.effect_steps]
-        self.status_var.set("Rendering stack preview...")
+        self.set_busy("Rendering stack preview...")
 
         def build_preview() -> tuple[int, Image.Image]:
             return token, apply_effect_stack(source, steps)
@@ -565,7 +646,7 @@ class ColorUtilsApp:
             return
         self.preview_image = image
         self.result_image = image
-        self.status_var.set("Preview updated")
+        self.set_idle("Preview updated")
         self.schedule_render()
 
     def save_result(self) -> None:
@@ -585,7 +666,7 @@ class ColorUtilsApp:
         if Path(path).suffix.lower() in {".jpg", ".jpeg"}:
             result = result.convert("RGB")
         result.save(path)
-        self.status_var.set(f"Saved {Path(path).name}")
+        self.set_idle(f"Saved {Path(path).name}")
 
     def output_name(self) -> str:
         stem = self.image_path.stem if self.image_path else "image"
@@ -708,7 +789,7 @@ class ColorUtilsApp:
         page = self.palette_page + 1
         sort = self.palette_sort_var.get()
         self.palette_loading = True
-        self.status_var.set("Loading palettes...")
+        self.set_busy("Loading palettes...")
 
         def load_page() -> tuple[int, list[Palette], int]:
             palettes, total = self.client.list_palettes(page=page, sorting_type=sort, refresh=refresh)
@@ -721,9 +802,13 @@ class ColorUtilsApp:
         self.palette_loading = False
         self.palette_page = max(self.palette_page, page)
         self.palette_total = total
+        previous_count = len(self.palettes)
         self.palettes.extend(palettes)
-        self.populate_palette_listbox()
-        self.status_var.set(f"Palettes {len(self.palettes)} / {self.palette_total}")
+        if previous_count == 0 or page == 0:
+            self.populate_palette_listbox()
+        else:
+            self.append_palette_rows(palettes)
+        self.set_idle(f"Palettes {len(self.palettes)} / {self.palette_total}")
         if len(self.palettes) < 40 and len(self.palettes) < self.palette_total:
             self.load_more_palettes()
 
@@ -741,7 +826,7 @@ class ColorUtilsApp:
             self.load_palettes(reset=True)
             return
         self.palette_mode = "search"
-        self.status_var.set("Searching palettes...")
+        self.set_busy("Searching palettes...")
 
         def search() -> tuple[int, list[Palette]]:
             return token, self.client.search_palettes(query)
@@ -754,7 +839,7 @@ class ColorUtilsApp:
             return
         self.palettes = list(palettes)
         self.populate_palette_listbox()
-        self.status_var.set(f"Found {len(self.palettes)} palettes")
+        self.set_idle(f"Found {len(self.palettes)} palettes")
 
     def clear_palette_search(self) -> None:
         self.palette_search_var.set("")
@@ -770,6 +855,17 @@ class ColorUtilsApp:
             return
         for palette in self.palettes:
             self.palette_list.insert("end", f"{palette.title} | {palette.color_count}")
+
+    def append_palette_rows(self, palettes: list[Palette]) -> None:
+        if not self.palette_list:
+            return
+        try:
+            first, _last = self.palette_list.yview()
+            for palette in palettes:
+                self.palette_list.insert("end", f"{palette.title} | {palette.color_count}")
+            self.palette_list.yview_moveto(first)
+        except TclError:
+            return
 
     def on_palette_select(self, _event=None) -> None:
         if not self.palette_list:
@@ -787,7 +883,8 @@ class ColorUtilsApp:
             step.params["palette_title"] = self.current_palette.title
             step.params["palette_slug"] = self.current_palette.slug
             self.refresh_stack_list()
-            self.render_parameter_panel()
+            self.flash_widget(self.palette_list)
+            self.status_var.set(f"Selected palette: {self.current_palette.title}")
             self.schedule_stack_preview()
 
     def palette_yview(self, *args) -> None:
@@ -816,7 +913,7 @@ class ColorUtilsApp:
         )
         if path:
             save_palette_png(palette.colors, path)
-            self.status_var.set(f"Exported {Path(path).name}")
+            self.set_idle(f"Exported {Path(path).name}")
 
     def export_palette_gpl(self) -> None:
         palette = self.current_palette
@@ -830,7 +927,29 @@ class ColorUtilsApp:
         )
         if path:
             save_palette_gpl(palette.colors, path, name=palette.title)
-            self.status_var.set(f"Exported {Path(path).name}")
+            self.set_idle(f"Exported {Path(path).name}")
+
+    def set_busy(self, message: str) -> None:
+        self.status_var.set(message)
+        try:
+            self.busy_bar.start(10)
+        except TclError:
+            pass
+
+    def set_idle(self, message: str) -> None:
+        self.status_var.set(message)
+        try:
+            self.busy_bar.stop()
+        except TclError:
+            pass
+
+    def flash_widget(self, widget) -> None:
+        try:
+            original = widget.cget("bg")
+            widget.configure(bg="#f0f7ff")
+            self.root.after(140, lambda: widget.configure(bg=original))
+        except TclError:
+            pass
 
 
 def main() -> None:

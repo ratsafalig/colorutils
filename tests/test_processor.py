@@ -81,3 +81,27 @@ def test_effect_stack_supports_edges_morphology_and_pixel_perfect() -> None:
 
     assert result.size == image.size
     assert result.mode == "RGBA"
+
+
+def test_effect_stack_supports_extended_operators() -> None:
+    image = Image.new("RGBA", (20, 20), (120, 80, 40, 255))
+    steps = [
+        make_effect("color_adjust"),
+        make_effect("gamma"),
+        make_effect("threshold"),
+        make_effect("posterize"),
+        make_effect("invert"),
+        make_effect("box_blur"),
+        make_effect("unsharp"),
+        make_effect("emboss"),
+        make_effect("median"),
+        make_effect("dog"),
+        make_effect("opening"),
+        make_effect("closing"),
+        make_effect("morph_gradient"),
+    ]
+
+    result = apply_effect_stack(image, steps)
+
+    assert result.size == image.size
+    assert result.mode == "RGBA"
