@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import queue
 import threading
 from pathlib import Path
+from typing import Any
 from tkinter import BooleanVar, DoubleVar, IntVar, StringVar, TclError, Tk, filedialog, messagebox
 from tkinter import Canvas, Frame, Label, Listbox, Scrollbar, Text
 from tkinter import ttk
 
 from PIL import Image, ImageTk
 
-from .effects import EFFECT_LABELS, EffectStep, apply_effect_stack, make_effect
+from .effects import EFFECT_LABELS, EffectStep, apply_effect, make_effect
 from .lospec import LospecClient
 from .models import Palette
 from .processor import histogram_rgb, image_statistics, save_palette_gpl, save_palette_png
@@ -37,6 +39,7 @@ class ColorUtilsApp:
         self.source_image: Image.Image | None = None
         self.preview_image: Image.Image | None = None
         self.result_image: Image.Image | None = None
+        self.source_version = 0
         self.image_path: Path | None = None
         self.original_photo: ImageTk.PhotoImage | None = None
         self.preview_photo: ImageTk.PhotoImage | None = None
@@ -45,6 +48,7 @@ class ColorUtilsApp:
         self.selected_step_index: int | None = None
         self.drag_index: int | None = None
         self.param_vars: list[object] = []
+        self.stack_row_widgets: list[Frame] = []
 
         self.palettes: list[Palette] = []
         self.current_palette: Palette | None = None
@@ -61,6 +65,11 @@ class ColorUtilsApp:
         self.sharp_preview_var = BooleanVar(value=False)
 
         self.preview_token = 0
+        self.preview_cache: OrderedDict[tuple[Any, ...], tuple[Image.Image, int]] = OrderedDict()
+        self.preview_cache_limit = 48
+        self.preview_cache_max_bytes = 512 * 1024 * 1024
+        self.preview_cache_bytes = 0
+        self.preview_cache_lock = threading.Lock()
         self.palette_search_token = 0
         self.palette_search_after_id: str | None = None
         self.stack_after_id: str | None = None
@@ -119,6 +128,14 @@ class ColorUtilsApp:
         style.map("Accent.TButton", background=[("active", ACCENT_DARK), ("disabled", "#9eb6ef")])
         style.configure("TButton", background="#edf1f6", foreground=TEXT, borderwidth=0, padding=(12, 8))
         style.map("TButton", background=[("active", "#e2e8f0"), ("disabled", "#f3f4f6")])
+        style.configure("Stack.TButton", background="#eef2f7", foreground=TEXT, borderwidth=0, padding=(8, 5))
+        style.map("Stack.TButton", background=[("active", "#e2e8f0"), ("disabled", "#f4f6f8")])
+        style.configure("Danger.TButton", background="#fee2e2", foreground="#991b1b", borderwidth=0, padding=(8, 5))
+        style.map("Danger.TButton", background=[("active", "#fecaca")])
+        style.configure("On.TButton", background="#dcfce7", foreground="#166534", borderwidth=0, padding=(8, 5))
+        style.map("On.TButton", background=[("active", "#bbf7d0")])
+        style.configure("Off.TButton", background="#f1f5f9", foreground=MUTED, borderwidth=0, padding=(8, 5))
+        style.map("Off.TButton", background=[("active", "#e2e8f0")])
         style.configure("TEntry", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, padding=(8, 7))
         style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=BORDER, padding=(8, 7))
         style.configure("TCheckbutton", background=BG, foreground=TEXT)
@@ -170,32 +187,25 @@ class ColorUtilsApp:
             anchor="w", padx=16, pady=(18, 6)
         )
         stack_frame = Frame(parent, bg=PANEL)
-        stack_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
-        self.stack_list = Listbox(
+        stack_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self.stack_canvas = Canvas(
             stack_frame,
-            activestyle="none",
             bg="#ffffff",
-            fg=TEXT,
-            selectbackground="#dbeafe",
-            selectforeground=TEXT,
             highlightthickness=1,
             highlightbackground=BORDER,
             relief="flat",
             borderwidth=0,
-            font=("Segoe UI", 10),
         )
-        stack_scroll = Scrollbar(stack_frame, orient="vertical", command=self.stack_list.yview)
-        self.stack_list.configure(yscrollcommand=stack_scroll.set)
-        self.stack_list.pack(side="left", fill="both", expand=True)
+        self.stack_rows = Frame(self.stack_canvas, bg="#ffffff")
+        self.stack_window = self.stack_canvas.create_window((0, 0), window=self.stack_rows, anchor="nw")
+        stack_scroll = Scrollbar(stack_frame, orient="vertical", command=self.stack_canvas.yview)
+        self.stack_canvas.configure(yscrollcommand=stack_scroll.set)
+        self.stack_canvas.pack(side="left", fill="both", expand=True)
         stack_scroll.pack(side="right", fill="y")
-
-        buttons = Frame(parent, bg=PANEL)
-        buttons.pack(fill="x", padx=16, pady=(0, 16))
-        ttk.Button(buttons, text="Up", command=lambda: self.move_selected_step(-1)).pack(side="left", fill="x", expand=True)
-        ttk.Button(buttons, text="Down", command=lambda: self.move_selected_step(1)).pack(
-            side="left", fill="x", expand=True, padx=(6, 0)
-        )
-        ttk.Button(buttons, text="Delete", command=self.delete_selected_step).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.stack_rows.bind("<Configure>", self.sync_stack_scroll_region)
+        self.stack_canvas.bind("<Configure>", self.sync_stack_width)
+        self.stack_canvas.bind("<MouseWheel>", self.scroll_stack)
+        self.refresh_stack_list()
 
     def _build_center_panel(self, parent: Frame) -> None:
         toolbar = Frame(parent, bg=BG)
@@ -258,10 +268,6 @@ class ColorUtilsApp:
 
     def _bind_events(self) -> None:
         self.operation_list.bind("<Double-Button-1>", lambda _event: self.add_selected_operation())
-        self.stack_list.bind("<<ListboxSelect>>", self.on_stack_select)
-        self.stack_list.bind("<Button-1>", self.start_stack_drag)
-        self.stack_list.bind("<B1-Motion>", self.drag_stack)
-        self.stack_list.bind("<ButtonRelease-1>", self.on_stack_release)
         self.palette_search_var.trace_add("write", lambda *_: self.debounce_palette_search())
         self.root.bind("<Configure>", lambda _event: self.schedule_render())
 
@@ -305,26 +311,210 @@ class ColorUtilsApp:
             step.params["palette_title"] = self.current_palette.title
             step.params["palette_slug"] = self.current_palette.slug
         self.effect_steps.append(step)
-        self.flash_widget(self.stack_list)
+        self.flash_widget(self.stack_canvas)
         self.status_var.set(f"Added {step.label}")
         self.selected_step_index = len(self.effect_steps) - 1
         self.refresh_stack_list()
         self.render_parameter_panel()
         self.schedule_stack_preview()
 
-    def refresh_stack_list(self) -> None:
-        self.stack_list.delete(0, "end")
-        for index, step in enumerate(self.effect_steps, start=1):
-            prefix = "[on]" if step.enabled else "[off]"
-            self.stack_list.insert("end", f"{index}. {prefix} {step.label}    [delete]")
-        if self.selected_step_index is not None and self.selected_step_index < len(self.effect_steps):
-            self.stack_list.selection_clear(0, "end")
-            self.stack_list.selection_set(self.selected_step_index)
-            self.stack_list.activate(self.selected_step_index)
+    def clear_preview_cache(self) -> None:
+        with self.preview_cache_lock:
+            self.preview_cache.clear()
+            self.preview_cache_bytes = 0
 
-    def on_stack_select(self, _event=None) -> None:
-        selection = self.stack_list.curselection()
-        self.selected_step_index = selection[0] if selection else None
+    def cache_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return tuple(
+                (str(key), self.cache_value(item))
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            )
+        if isinstance(value, (list, tuple)):
+            return tuple(self.cache_value(item) for item in value)
+        if isinstance(value, set):
+            return tuple(sorted((self.cache_value(item) for item in value), key=repr))
+        return value
+
+    def step_cache_key(self, step: EffectStep) -> tuple[Any, ...]:
+        return (step.kind, self.cache_value(step.params))
+
+    def cached_preview_image(self, key: tuple[Any, ...]) -> Image.Image | None:
+        with self.preview_cache_lock:
+            entry = self.preview_cache.get(key)
+            if entry is None:
+                return None
+            self.preview_cache.move_to_end(key)
+            image, _size = entry
+            return image.copy()
+
+    def store_preview_image(self, key: tuple[Any, ...], image: Image.Image) -> None:
+        with self.preview_cache_lock:
+            old_entry = self.preview_cache.pop(key, None)
+            if old_entry is not None:
+                self.preview_cache_bytes -= old_entry[1]
+            cached = image.copy()
+            size = self.image_cache_size(cached)
+            self.preview_cache[key] = (cached, size)
+            self.preview_cache_bytes += size
+            self.preview_cache.move_to_end(key)
+            while len(self.preview_cache) > self.preview_cache_limit or (
+                self.preview_cache_bytes > self.preview_cache_max_bytes and len(self.preview_cache) > 1
+            ):
+                _old_key, (_old_image, old_size) = self.preview_cache.popitem(last=False)
+                self.preview_cache_bytes -= old_size
+
+    def image_cache_size(self, image: Image.Image) -> int:
+        return image.width * image.height * max(1, len(image.getbands()))
+
+    def apply_effect_stack_cached(
+        self,
+        image: Image.Image,
+        steps: list[EffectStep],
+        source_version: int,
+    ) -> tuple[Image.Image, int, int]:
+        result = image.convert("RGBA")
+        state_key: tuple[Any, ...] = ("source", source_version)
+        hits = 0
+        misses = 0
+
+        for step in steps:
+            if not step.enabled:
+                continue
+            output_key = ("step", state_key, self.step_cache_key(step))
+            cached = self.cached_preview_image(output_key)
+            if cached is not None:
+                result = cached
+                hits += 1
+            else:
+                result = apply_effect(result, step)
+                self.store_preview_image(output_key, result)
+                misses += 1
+            state_key = output_key
+
+        return result, hits, misses
+
+    def sync_stack_scroll_region(self, _event=None) -> None:
+        self.stack_canvas.configure(scrollregion=self.stack_canvas.bbox("all"))
+
+    def sync_stack_width(self, event) -> None:
+        self.stack_canvas.itemconfigure(self.stack_window, width=max(1, event.width - 4))
+
+    def scroll_stack(self, event) -> None:
+        self.stack_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def refresh_stack_list(self) -> None:
+        for child in self.stack_rows.winfo_children():
+            child.destroy()
+        self.stack_row_widgets.clear()
+
+        if self.selected_step_index is not None and self.selected_step_index >= len(self.effect_steps):
+            self.selected_step_index = len(self.effect_steps) - 1 if self.effect_steps else None
+
+        if not self.effect_steps:
+            empty = Label(
+                self.stack_rows,
+                text="No effects in stack",
+                bg="#ffffff",
+                fg=MUTED,
+                font=("Segoe UI", 10),
+            )
+            empty.pack(fill="x", padx=10, pady=14)
+            self.sync_stack_scroll_region()
+            return
+
+        for index, step in enumerate(self.effect_steps):
+            self.create_stack_row(index, step)
+        self.sync_stack_scroll_region()
+
+    def create_stack_row(self, index: int, step: EffectStep) -> None:
+        selected = index == self.selected_step_index
+        row_bg = "#eef6ff" if selected else ("#ffffff" if step.enabled else "#f8fafc")
+        row_border = ACCENT if selected else BORDER
+        text_color = TEXT if step.enabled else MUTED
+        row = Frame(self.stack_rows, bg=row_bg, highlightbackground=row_border, highlightthickness=1)
+        row.pack(fill="x", padx=8, pady=(8, 0))
+        self.stack_row_widgets.append(row)
+
+        top = Frame(row, bg=row_bg)
+        top.pack(fill="x", padx=9, pady=(8, 4))
+        index_label = Label(
+            top,
+            text=f"{index + 1:02d}",
+            bg=row_bg,
+            fg=ACCENT if selected else MUTED,
+            width=3,
+            anchor="w",
+            font=("Segoe UI", 9, "bold"),
+        )
+        index_label.pack(side="left")
+        title = Label(
+            top,
+            text=step.label,
+            bg=row_bg,
+            fg=text_color,
+            anchor="w",
+            justify="left",
+            wraplength=165,
+            font=("Segoe UI", 10, "bold" if selected else "normal"),
+        )
+        title.pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(
+            top,
+            text="Delete",
+            width=7,
+            style="Danger.TButton",
+            command=lambda i=index: self.delete_step(i),
+        ).pack(side="right")
+
+        bottom = Frame(row, bg=row_bg)
+        bottom.pack(fill="x", padx=9, pady=(0, 8))
+        state = Label(
+            bottom,
+            text="Enabled" if step.enabled else "Disabled",
+            bg=row_bg,
+            fg="#166534" if step.enabled else MUTED,
+            anchor="w",
+            font=("Segoe UI", 9),
+        )
+        state.pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            bottom,
+            text="Up",
+            width=4,
+            style="Stack.TButton",
+            state="disabled" if index == 0 else "normal",
+            command=lambda i=index: self.move_step(i, -1),
+        ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            bottom,
+            text="Down",
+            width=5,
+            style="Stack.TButton",
+            state="disabled" if index == len(self.effect_steps) - 1 else "normal",
+            command=lambda i=index: self.move_step(i, 1),
+        ).pack(side="left", padx=(4, 0))
+        ttk.Button(
+            bottom,
+            text="On" if step.enabled else "Off",
+            width=4,
+            style="On.TButton" if step.enabled else "Off.TButton",
+            command=lambda i=index: self.toggle_step(i),
+        ).pack(side="left", padx=(4, 0))
+
+        for widget in (row, top, bottom, index_label, title, state):
+            widget.bind("<Button-1>", lambda event, i=index: self.start_stack_drag(event, i))
+            widget.bind("<B1-Motion>", self.drag_stack)
+            widget.bind("<ButtonRelease-1>", lambda _event: self.finish_stack_drag())
+            widget.bind("<MouseWheel>", self.scroll_stack)
+
+    def select_stack_step(self, index: int, *, refresh: bool = True) -> None:
+        if not (0 <= index < len(self.effect_steps)):
+            return
+        if self.selected_step_index == index:
+            return
+        self.selected_step_index = index
+        if refresh:
+            self.refresh_stack_list()
         self.render_parameter_panel()
 
     def selected_step(self) -> EffectStep | None:
@@ -337,38 +527,63 @@ class ColorUtilsApp:
     def move_selected_step(self, direction: int) -> None:
         if self.selected_step_index is None:
             return
-        new_index = self.selected_step_index + direction
+        self.move_step(self.selected_step_index, direction)
+
+    def move_step(self, index: int, direction: int) -> None:
+        new_index = index + direction
         if not (0 <= new_index < len(self.effect_steps)):
             return
-        self.effect_steps[self.selected_step_index], self.effect_steps[new_index] = (
-            self.effect_steps[new_index],
-            self.effect_steps[self.selected_step_index],
-        )
+        self.effect_steps[index], self.effect_steps[new_index] = self.effect_steps[new_index], self.effect_steps[index]
         self.selected_step_index = new_index
         self.refresh_stack_list()
-        self.flash_widget(self.stack_list)
+        self.flash_widget(self.stack_canvas)
         self.render_parameter_panel()
         self.schedule_stack_preview()
 
     def delete_selected_step(self) -> None:
         if self.selected_step_index is None:
             return
-        del self.effect_steps[self.selected_step_index]
+        self.delete_step(self.selected_step_index)
+
+    def delete_step(self, index: int) -> None:
+        if not (0 <= index < len(self.effect_steps)):
+            return
+        label = self.effect_steps[index].label
+        del self.effect_steps[index]
         if not self.effect_steps:
             self.selected_step_index = None
+        elif self.selected_step_index is None:
+            self.selected_step_index = min(index, len(self.effect_steps) - 1)
+        elif self.selected_step_index > index:
+            self.selected_step_index -= 1
         else:
             self.selected_step_index = min(self.selected_step_index, len(self.effect_steps) - 1)
+        self.status_var.set(f"Deleted {label}")
         self.refresh_stack_list()
         self.render_parameter_panel()
         self.schedule_stack_preview()
 
-    def start_stack_drag(self, event) -> None:
-        self.drag_index = self.stack_list.nearest(event.y)
+    def toggle_step(self, index: int) -> None:
+        if not (0 <= index < len(self.effect_steps)):
+            return
+        self.selected_step_index = index
+        step = self.effect_steps[index]
+        step.enabled = not step.enabled
+        self.status_var.set("Step enabled" if step.enabled else "Step disabled")
+        self.refresh_stack_list()
+        self.render_parameter_panel()
+        self.schedule_stack_preview()
+
+    def start_stack_drag(self, _event, index: int) -> None:
+        self.drag_index = index
+        self.select_stack_step(index, refresh=False)
 
     def drag_stack(self, event) -> None:
         if self.drag_index is None or not self.effect_steps:
             return
-        target = self.stack_list.nearest(event.y)
+        target = self.stack_drag_target(event.y_root)
+        if target is None:
+            return
         if target == self.drag_index or not (0 <= target < len(self.effect_steps)):
             return
         step = self.effect_steps.pop(self.drag_index)
@@ -376,19 +591,20 @@ class ColorUtilsApp:
         self.drag_index = target
         self.selected_step_index = target
         self.refresh_stack_list()
-        self.flash_widget(self.stack_list)
+        self.flash_widget(self.stack_canvas)
         self.schedule_stack_preview()
+
+    def stack_drag_target(self, y_root: int) -> int | None:
+        for index, row in enumerate(self.stack_row_widgets):
+            top = row.winfo_rooty()
+            bottom = top + row.winfo_height()
+            if top <= y_root <= bottom:
+                return index
+        return None
 
     def finish_stack_drag(self) -> None:
         self.drag_index = None
-
-    def on_stack_release(self, event) -> None:
-        index = self.stack_list.nearest(event.y)
-        delete_zone = self.stack_list.winfo_width() - 82
-        self.finish_stack_drag()
-        if 0 <= index < len(self.effect_steps) and event.x >= delete_zone:
-            self.selected_step_index = index
-            self.delete_selected_step()
+        self.refresh_stack_list()
 
     def render_parameter_panel(self) -> None:
         self.palette_list = None
@@ -612,6 +828,8 @@ class ColorUtilsApp:
             return
         self.image_path = Path(path)
         self.source_image = image.convert("RGBA")
+        self.source_version += 1
+        self.clear_preview_cache()
         self.preview_image = self.source_image.copy()
         self.result_image = self.preview_image.copy()
         self.image_info_var.set(f"{self.image_path.name}  |  {self.source_image.width} x {self.source_image.height}")
@@ -632,21 +850,24 @@ class ColorUtilsApp:
         self.preview_token += 1
         token = self.preview_token
         source = self.source_image.copy()
+        source_version = self.source_version
         steps = [step.copy() for step in self.effect_steps]
         self.set_busy("Rendering stack preview...")
 
-        def build_preview() -> tuple[int, Image.Image]:
-            return token, apply_effect_stack(source, steps)
+        def build_preview() -> tuple[int, Image.Image, int, int]:
+            image, hits, misses = self.apply_effect_stack_cached(source, steps, source_version)
+            return token, image, hits, misses
 
         self.run_background("preview", build_preview)
 
     def receive_preview(self, payload: object) -> None:
-        token, image = payload  # type: ignore[misc]
+        token, image, hits, _misses = payload  # type: ignore[misc]
         if token != self.preview_token:
             return
         self.preview_image = image
         self.result_image = image
-        self.set_idle("Preview updated")
+        suffix = f" ({hits} cached)" if hits else ""
+        self.set_idle(f"Preview updated{suffix}")
         self.schedule_render()
 
     def save_result(self) -> None:
@@ -662,7 +883,14 @@ class ColorUtilsApp:
         )
         if not path:
             return
-        result = self.result_image or apply_effect_stack(self.source_image, [step.copy() for step in self.effect_steps])
+        if self.result_image:
+            result = self.result_image
+        else:
+            result, _hits, _misses = self.apply_effect_stack_cached(
+                self.source_image,
+                [step.copy() for step in self.effect_steps],
+                self.source_version,
+            )
         if Path(path).suffix.lower() in {".jpg", ".jpeg"}:
             result = result.convert("RGB")
         result.save(path)
